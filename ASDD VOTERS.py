@@ -6,7 +6,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER
 
 # Define category properties per the system specification
 CATEGORIES = {
@@ -43,8 +43,19 @@ def clean_val(val):
     v_str = str(val).strip()
     return re.sub(r'\.0$', '', v_str)
 
-def normalize_columns(df):
-    """Maps dynamic column names from the uploaded sheet to standardized internally-used key names."""
+def safe_extract_scalar(val):
+    """Safely extracts a scalar value if it's wrapped in a Series or a list/tuple."""
+    if hasattr(val, "iloc"):
+        val = val.iloc[0]
+    if isinstance(val, (list, tuple)) and len(val) > 0:
+        val = val[0]
+    return val
+
+def normalize_and_deduplicate_columns(df):
+    """
+    Maps dynamic column names from the uploaded sheet to standardized internally-used key names.
+    If multiple columns map to the same name, only the first is renamed to the target to avoid duplicates.
+    """
     mapping = {
         'assembly constituency (ac) no. & name': 'ac_name',
         'assembly constituency': 'ac_name',
@@ -65,17 +76,32 @@ def normalize_columns(df):
         'relative name': 'relative_name',
         'name of relative': 'relative_name'
     }
-    rename_dict = {}
+    
+    new_cols = []
+    seen_targets = set()
+    
     for col in df.columns:
-        normalized = str(col).strip().lower()
-        if normalized in mapping:
-            rename_dict[col] = mapping[normalized]
-    return df.rename(columns=rename_dict)
+        col_str = str(col).strip()
+        normalized = col_str.lower()
+        target = mapping.get(normalized)
+        
+        if target:
+            if target not in seen_targets:
+                new_cols.append(target)
+                seen_targets.add(target)
+            else:
+                # If a column has already taken this target name, rename this one to prevent duplicates
+                new_cols.append(f"{target}_duplicate_{col_str}")
+        else:
+            new_cols.append(col_str)
+            
+    df_copy = df.copy()
+    df_copy.columns = new_cols
+    return df_copy
 
 def generate_pdf(data_rows, ac_name, part_no, category_info):
     """Generates standard A4 PDF containing headers, matched records table, and formatted signature blocks."""
     buffer = io.BytesIO()
-    # A4 printable area is roughly 523pt wide with 36pt (0.5 inch) margins
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
@@ -155,7 +181,7 @@ def generate_pdf(data_rows, ac_name, part_no, category_info):
             Paragraph(str(row.get('remarks', '')), style_cell)
         ])
 
-    # Standard landscape printable width distribution across 6 columns
+    # Printable width distribution across 6 columns
     col_widths = [30, 80, 60, 115, 115, 123]
     voter_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     voter_table.setStyle(TableStyle([
@@ -193,14 +219,12 @@ def generate_pdf(data_rows, ac_name, part_no, category_info):
         ]
     ]
     
-    # 2-column signature alignment
     footer_table = Table(footer_table_data, colWidths=[240, 283])
     footer_table.setStyle(TableStyle([
         ('VALIGN', (0,0), (-1,-1), 'TOP'),
         ('BOTTOMPADDING', (0,0), (-1,-1), 4),
     ]))
     
-    # Keep the signature group intact (avoids breaking awkwardly onto new pages)
     story.append(KeepTogether([footer_table]))
 
     doc.build(story)
@@ -221,7 +245,7 @@ if uploaded_file is not None:
     try:
         # Load raw data safely
         raw_df = pd.read_excel(uploaded_file, dtype=str)
-        normalized_df = normalize_columns(raw_df)
+        normalized_df = normalize_and_deduplicate_columns(raw_df)
         
         # Verify columns exist
         required_cols = ['ac_name', 'part_no', 'serial_no', 'epic_no', 'elector_name', 'relative_name']
@@ -258,7 +282,6 @@ if uploaded_file is not None:
             # Parse entered numbers
             parsed_serials = []
             if serial_input.strip():
-                # Regular expression to extract numeric elements
                 parsed_serials = [clean_val(s) for s in re.split(r'[,\s\n]+', serial_input) if s.strip()]
             
             # 3. Lookup Records
@@ -273,9 +296,13 @@ if uploaded_file is not None:
                 ].copy()
                 
                 if not matched_records.empty:
-                    # Dynamically extract Assembly Constituency Name
-                    ac_name_raw = matched_records['ac_name'].iloc[0] if 'ac_name' in matched_records.columns else "N/A"
-                    ac_name = clean_val(ac_name_raw) if ac_name_raw else "N/A"
+                    # Dynamically extract Assembly Constituency Name safely
+                    if 'ac_name' in matched_records.columns and not matched_records['ac_name'].empty:
+                        ac_name_raw = matched_records['ac_name'].iloc[0]
+                        ac_name_raw = safe_extract_scalar(ac_name_raw)
+                        ac_name = clean_val(ac_name_raw) if (pd.notna(ac_name_raw) and str(ac_name_raw).strip() != "") else "N/A"
+                    else:
+                        ac_name = "N/A"
                     
                     st.success(f"Successfully located {len(matched_records)} voter record(s) matching Part No. {part_no_selection}.")
                     
