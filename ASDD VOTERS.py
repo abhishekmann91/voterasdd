@@ -36,15 +36,26 @@ CATEGORIES = {
     }
 }
 
+# Initialize session state variables
+if 'master_df' not in st.session_state:
+    st.session_state['master_df'] = None
+if 'uploaded_file_name' not in st.session_state:
+    st.session_state['uploaded_file_name'] = ""
+if 'search_submitted' not in st.session_state:
+    st.session_state['search_submitted'] = False
+
+def reset_search():
+    """Callback function to reset submission state when any input filter changes."""
+    st.session_state['search_submitted'] = False
+
 def clean_val(val):
     if pd.isna(val) or val is None:
         return ""
-    # Convert float representation of numbers like 12.0 to 12
     v_str = str(val).strip()
     return re.sub(r'\.0$', '', v_str)
 
 def safe_extract_scalar(val):
-    """Safely extracts a scalar value if it's wrapped in a Series or a list/tuple."""
+    """Safely extracts a scalar value if it is wrapped inside a Series or sequence."""
     if hasattr(val, "iloc"):
         val = val.iloc[0]
     if isinstance(val, (list, tuple)) and len(val) > 0:
@@ -53,8 +64,8 @@ def safe_extract_scalar(val):
 
 def normalize_and_deduplicate_columns(df):
     """
-    Maps dynamic column names from the uploaded sheet to standardized internally-used key names.
-    If multiple columns map to the same name, only the first is renamed to the target to avoid duplicates.
+    Maps dynamic column names from the uploaded sheet to standardized internally-used names.
+    If duplicate matches occur, only the first is renamed to avoid column collisions.
     """
     mapping = {
         'assembly constituency (ac) no. & name': 'ac_name',
@@ -90,7 +101,6 @@ def normalize_and_deduplicate_columns(df):
                 new_cols.append(target)
                 seen_targets.add(target)
             else:
-                # If a column has already taken this target name, rename this one to prevent duplicates
                 new_cols.append(f"{target}_duplicate_{col_str}")
         else:
             new_cols.append(col_str)
@@ -100,7 +110,7 @@ def normalize_and_deduplicate_columns(df):
     return df_copy
 
 def generate_pdf(data_rows, ac_name, part_no, category_info):
-    """Generates standard A4 PDF containing headers, matched records table, and formatted signature blocks."""
+    """Generates a standard A4 PDF with clean headers, data tables, and standard BLO signoffs."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -113,7 +123,6 @@ def generate_pdf(data_rows, ac_name, part_no, category_info):
     story = []
     styles = getSampleStyleSheet()
 
-    # Define clean typography styles
     style_annexure = ParagraphStyle(
         'DocAnnexure',
         parent=styles['Heading2'],
@@ -155,12 +164,10 @@ def generate_pdf(data_rows, ac_name, part_no, category_info):
         fontName='Helvetica-Bold'
     )
 
-    # 1. Header Sections
     story.append(Paragraph(category_info['annexure'], style_annexure))
     story.append(Paragraph(f"AC No. & Name: {ac_name} | Part No.: {part_no}", style_header))
     story.append(Paragraph(category_info['title'], style_title))
 
-    # 2. Setup Main Voter Data Table
     table_headers = [
         Paragraph("<b>S. No.</b>", style_cell_bold),
         Paragraph("<b>EPIC No.</b>", style_cell_bold),
@@ -174,14 +181,13 @@ def generate_pdf(data_rows, ac_name, part_no, category_info):
     for idx, row in enumerate(data_rows, start=1):
         table_data.append([
             Paragraph(str(idx), style_cell),
-            Paragraph(str(row.get('epic_no', '')), style_cell),
-            Paragraph(str(row.get('serial_no', '')), style_cell),
-            Paragraph(str(row.get('elector_name', '')), style_cell),
-            Paragraph(str(row.get('relative_name', '')), style_cell),
-            Paragraph(str(row.get('remarks', '')), style_cell)
+            Paragraph(str(row.get('epic_no', ''))),
+            Paragraph(str(row.get('serial_no', ''))),
+            Paragraph(str(row.get('elector_name', ''))),
+            Paragraph(str(row.get('relative_name', ''))),
+            Paragraph(str(row.get('remarks', '')))
         ])
 
-    # Printable width distribution across 6 columns
     col_widths = [30, 80, 60, 115, 115, 123]
     voter_table = Table(table_data, colWidths=col_widths, repeatRows=1)
     voter_table.setStyle(TableStyle([
@@ -195,28 +201,15 @@ def generate_pdf(data_rows, ac_name, part_no, category_info):
     story.append(voter_table)
     story.append(Spacer(1, 25))
 
-    # 3. Footer Block (Signatures of BLO & BLA-2)
     footer_table_data = [
         [
             Paragraph("<b>Sign of BLO:</b> _____________________", style_cell),
             Paragraph("<b>Sign of BLA-2:</b>", style_cell)
         ],
-        [
-            "",
-            Paragraph("(i) __________________________", style_cell)
-        ],
-        [
-            "",
-            Paragraph("(ii) __________________________", style_cell)
-        ],
-        [
-            "",
-            Paragraph("(iii) __________________________", style_cell)
-        ],
-        [
-            "",
-            Paragraph("(iv) __________________________", style_cell)
-        ]
+        ["", Paragraph("(i) __________________________", style_cell)],
+        ["", Paragraph("(ii) __________________________", style_cell)],
+        ["", Paragraph("(iii) __________________________", style_cell)],
+        ["", Paragraph("(iv) __________________________", style_cell)]
     ]
     
     footer_table = Table(footer_table_data, colWidths=[240, 283])
@@ -232,136 +225,152 @@ def generate_pdf(data_rows, ac_name, part_no, category_info):
     return buffer
 
 
-# --- Streamlit Front-End ---
+# --- Streamlit Layout ---
 st.set_page_config(page_title="ASDD PDF Generator", layout="wide")
 
 st.title("Voter List Processing & ASDD PDF Generator")
-st.write("This application helps Election Booth Level Officers (BLOs) generate formatted ASDD PDF Annexure reports.")
+st.write("This application helps Election Booth Level Officers (BLOs) process voter lists and generate formatted ASDD PDF reports.")
 
-# 1. Excel File Upload
+# 1. Excel File Upload Handler
 uploaded_file = st.file_uploader("Upload Master Voter List Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
-    try:
-        # Load raw data safely
-        raw_df = pd.read_excel(uploaded_file, dtype=str)
-        normalized_df = normalize_and_deduplicate_columns(raw_df)
-        
-        # Verify columns exist
-        required_cols = ['ac_name', 'part_no', 'serial_no', 'epic_no', 'elector_name', 'relative_name']
-        missing_cols = [col for col in required_cols if col not in normalized_df.columns]
-        
-        if missing_cols:
-            st.error(f"The Excel file is missing the following required structural columns: {', '.join(missing_cols)}")
-            st.info("Ensure your master Excel file contains: 'Assembly Constituency (AC) No. & Name', 'Part No.', 'Part Serial No.', 'EPIC No.', 'Elector Name', and 'Relative Name'.")
-        else:
-            # 2. Form Selections
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                part_no_selection = st.selectbox(
-                    "Select Part Number:",
-                    options=["242", "243", "244", "245", "246", "247", "248", "249", "252"]
-                )
-            
-            with col2:
-                category_selection = st.selectbox(
-                    "Select Target List Category (Annexure Type):",
-                    options=list(CATEGORIES.keys())
-                )
+    # If a brand-new file is uploaded, parse and store it
+    if uploaded_file.name != st.session_state['uploaded_file_name']:
+        try:
+            with st.spinner("Processing new Excel file..."):
+                raw_df = pd.read_excel(uploaded_file, dtype=str)
+                normalized_df = normalize_and_deduplicate_columns(raw_df)
                 
-            category_info = CATEGORIES[category_selection]
-            
-            # Input Text Field for Serial Numbers
-            serial_input = st.text_area(
-                "Enter Part Serial Numbers (SL No. in the Part):",
-                placeholder="Examples: 14, 25, 102 (Separated by commas, spaces, or lines)",
-                help="You can copy/paste serial numbers directly."
-            )
-            
-            # Parse entered numbers
-            parsed_serials = []
-            if serial_input.strip():
-                parsed_serials = [clean_val(s) for s in re.split(r'[,\s\n]+', serial_input) if s.strip()]
-            
-            # 3. Lookup Records
-            if parsed_serials:
-                # Standardize database format columns for lookup matching
-                normalized_df['part_no_clean'] = normalized_df['part_no'].apply(clean_val)
-                normalized_df['serial_no_clean'] = normalized_df['serial_no'].apply(clean_val)
+                required_cols = ['ac_name', 'part_no', 'serial_no', 'epic_no', 'elector_name', 'relative_name']
+                missing_cols = [col for col in required_cols if col not in normalized_df.columns]
                 
-                matched_records = normalized_df[
-                    (normalized_df['part_no_clean'] == part_no_selection) &
-                    (normalized_df['serial_no_clean'].isin(parsed_serials))
-                ].copy()
-                
-                if not matched_records.empty:
-                    # Dynamically extract Assembly Constituency Name safely
-                    if 'ac_name' in matched_records.columns and not matched_records['ac_name'].empty:
-                        ac_name_raw = matched_records['ac_name'].iloc[0]
-                        ac_name_raw = safe_extract_scalar(ac_name_raw)
-                        ac_name = clean_val(ac_name_raw) if (pd.notna(ac_name_raw) and str(ac_name_raw).strip() != "") else "N/A"
-                    else:
-                        ac_name = "N/A"
-                    
-                    st.success(f"Successfully located {len(matched_records)} voter record(s) matching Part No. {part_no_selection}.")
-                    
-                    # Construct default remark structure
-                    matched_records['remarks'] = category_info['default_remark']
-                    
-                    # Prepare structured dataset for verification & editing
-                    display_cols = {
-                        'serial_no_clean': 'SL No. in the Part',
-                        'epic_no': 'EPIC No.',
-                        'elector_name': 'Name of the Elector',
-                        'relative_name': 'Name of Relative',
-                        'remarks': category_info['last_col']
-                    }
-                    
-                    # Clean records and fill empty cells
-                    for col in display_cols.keys():
-                        if col not in matched_records.columns:
-                            matched_records[col] = ""
-                        else:
-                            matched_records[col] = matched_records[col].apply(clean_val)
-                    
-                    editable_df = matched_records[list(display_cols.keys())].rename(columns=display_cols)
-                    
-                    # Provide interface to directly edit remarks if needed
-                    st.subheader("Verify & Edit Report Details")
-                    st.write("Double-click cells in the table below to customize fields (such as 'Remarks') before PDF generation.")
-                    edited_df = st.data_editor(editable_df, use_container_width=True, hide_index=True)
-                    
-                    # Transform back to normalized structure for PDF compilation
-                    final_pdf_rows = []
-                    for _, row in edited_df.iterrows():
-                        final_pdf_rows.append({
-                            'serial_no': row['SL No. in the Part'],
-                            'epic_no': row['EPIC No.'],
-                            'elector_name': row['Name of the Elector'],
-                            'relative_name': row['Name of Relative'],
-                            'remarks': row[category_info['last_col']]
-                        })
-                    
-                    # 4. Generate & Download Action
-                    st.markdown("---")
-                    pdf_buffer = generate_pdf(final_pdf_rows, ac_name, part_no_selection, category_info)
-                    
-                    filename = f"{category_info['annexure']}_Part_{part_no_selection}.pdf"
-                    
-                    st.download_button(
-                        label="📄 Generate & Download PDF Report",
-                        data=pdf_buffer,
-                        file_name=filename,
-                        mime="application/pdf"
-                    )
+                if missing_cols:
+                    st.error(f"The Excel file is missing the following required structural columns: {', '.join(missing_cols)}")
+                    st.session_state['master_df'] = None
+                    st.session_state['uploaded_file_name'] = ""
                 else:
-                    st.warning(f"No matching records found for the entered Serial Numbers in Part {part_no_selection}.")
+                    st.session_state['master_df'] = normalized_df
+                    st.session_state['uploaded_file_name'] = uploaded_file.name
+                    st.session_state['search_submitted'] = False  # Reset query on new file load
+                    st.success(f"Successfully loaded and structured: {uploaded_file.name}")
+        except Exception as e:
+            st.error(f"An error occurred while loading the file: {e}")
+
+# Display current database state
+if st.session_state['master_df'] is not None:
+    st.info(f"📁 **Active Master List:** Using loaded file `{st.session_state['uploaded_file_name']}`. (Upload another file above if you wish to change it).")
+    
+    # 2. Parameters Configuration Input Form
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        part_no_selection = st.selectbox(
+            "Select Part Number:",
+            options=["242", "243", "244", "245", "246", "247", "248", "249", "252"],
+            on_change=reset_search
+        )
+    
+    with col2:
+        category_selection = st.selectbox(
+            "Select Target List Category (Annexure Type):",
+            options=list(CATEGORIES.keys()),
+            on_change=reset_search
+        )
+        
+    category_info = CATEGORIES[category_selection]
+    
+    serial_input = st.text_area(
+        "Enter Part Serial Numbers (SL No. in the Part):",
+        placeholder="Examples: 14, 25, 102 (Separated by commas, spaces, or lines)",
+        on_change=reset_search
+    )
+    
+    parsed_serials = []
+    if serial_input.strip():
+        parsed_serials = [clean_val(s) for s in re.split(r'[,\s\n]+', serial_input) if s.strip()]
+    
+    # 3. Submit Action Trigger
+    submit_button = st.button("Submit / Look Up Voters", type="primary")
+    
+    if submit_button:
+        if not parsed_serials:
+            st.warning("Please enter at least one Part Serial Number before submitting.")
+        else:
+            st.session_state['search_submitted'] = True
+
+    # 4. Process Results (only if Submit is clicked or already in submission state)
+    if st.session_state['search_submitted'] and parsed_serials:
+        df_db = st.session_state['master_df']
+        
+        # Standardize matching criteria
+        df_db['part_no_clean'] = df_db['part_no'].apply(clean_val)
+        df_db['serial_no_clean'] = df_db['serial_no'].apply(clean_val)
+        
+        matched_records = df_db[
+            (df_db['part_no_clean'] == part_no_selection) &
+            (df_db['serial_no_clean'].isin(parsed_serials))
+        ].copy()
+        
+        if not matched_records.empty:
+            # Dynamically extract Assembly Constituency Name
+            if 'ac_name' in matched_records.columns and not matched_records['ac_name'].empty:
+                ac_name_raw = matched_records['ac_name'].iloc[0]
+                ac_name_raw = safe_extract_scalar(ac_name_raw)
+                ac_name = clean_val(ac_name_raw) if (pd.notna(ac_name_raw) and str(ac_name_raw).strip() != "") else "N/A"
             else:
-                st.info("Please enter one or more Serial Numbers to begin processing.")
-                
-    except Exception as e:
-        st.error(f"An error occurred while loading or parsing the Excel file. Details: {e}")
-        st.info("Verify your file has the appropriate spreadsheet headers and is not corrupted.")
+                ac_name = "N/A"
+            
+            st.success(f"Located {len(matched_records)} voter record(s) matching Part No. {part_no_selection}.")
+            
+            # Populate default category remarks column
+            matched_records['remarks'] = category_info['default_remark']
+            
+            display_cols = {
+                'serial_no_clean': 'SL No. in the Part',
+                'epic_no': 'EPIC No.',
+                'elector_name': 'Name of the Elector',
+                'relative_name': 'Name of Relative',
+                'remarks': category_info['last_col']
+            }
+            
+            for col in display_cols.keys():
+                if col not in matched_records.columns:
+                    matched_records[col] = ""
+                else:
+                    matched_records[col] = matched_records[col].apply(clean_val)
+            
+            editable_df = matched_records[list(display_cols.keys())].rename(columns=display_cols)
+            
+            st.subheader("Verify & Edit Report Details")
+            st.write("You can double-click table cells below to edit voter information or write custom remarks before downloading.")
+            
+            # Build a stable key referencing input selections to safely track editor state across page reruns
+            editor_key = f"ed_{part_no_selection}_{category_info['annexure']}_{len(parsed_serials)}"
+            edited_df = st.data_editor(editable_df, use_container_width=True, hide_index=True, key=editor_key)
+            
+            # Map editor changes back to data records for printing
+            final_pdf_rows = []
+            for _, row in edited_df.iterrows():
+                final_pdf_rows.append({
+                    'serial_no': row['SL No. in the Part'],
+                    'epic_no': row['EPIC No.'],
+                    'elector_name': row['Name of the Elector'],
+                    'relative_name': row['Name of Relative'],
+                    'remarks': row[category_info['last_col']]
+                })
+            
+            st.markdown("---")
+            pdf_buffer = generate_pdf(final_pdf_rows, ac_name, part_no_selection, category_info)
+            filename = f"{category_info['annexure']}_Part_{part_no_selection}.pdf"
+            
+            st.download_button(
+                label="📄 Generate & Download PDF Report",
+                data=pdf_buffer,
+                file_name=filename,
+                mime="application/pdf"
+            )
+        else:
+            st.warning(f"No matching records found for the entered Serial Numbers in Part {part_no_selection}.")
 else:
-    st.info("Upload your Excel master file using the uploader above to begin.")
+    st.info("Upload your Excel master file to begin.")
