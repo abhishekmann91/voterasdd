@@ -2,11 +2,16 @@ import streamlit as st
 import pandas as pd
 import io
 import re
+import os
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
+
+# Cache configuration files
+CACHE_FILE = "master_db_cache.pkl"
+METADATA_FILE = "master_db_metadata.txt"
 
 # Define category properties per the system specification
 CATEGORIES = {
@@ -43,6 +48,38 @@ if 'uploaded_file_name' not in st.session_state:
     st.session_state['uploaded_file_name'] = ""
 if 'search_submitted' not in st.session_state:
     st.session_state['search_submitted'] = False
+
+def load_cached_data():
+    """Tries to read the persisted dataset and filename from local files."""
+    if os.path.exists(CACHE_FILE) and os.path.exists(METADATA_FILE):
+        try:
+            df = pd.read_pickle(CACHE_FILE)
+            with open(METADATA_FILE, "r") as f:
+                filename = f.read().strip()
+            return df, filename
+        except Exception:
+            return None, ""
+    return None, ""
+
+def save_to_cache(df, filename):
+    """Saves the normalized DataFrame and original filename to disk."""
+    try:
+        df.to_pickle(CACHE_FILE)
+        with open(METADATA_FILE, "w") as f:
+            f.write(filename)
+    except Exception as e:
+        st.error(f"Unable to write cache files: {e}")
+
+def clear_cache():
+    """Deletes cached files and clears the session state."""
+    if os.path.exists(CACHE_FILE):
+        os.remove(CACHE_FILE)
+    if os.path.exists(METADATA_FILE):
+        os.remove(METADATA_FILE)
+    st.session_state['master_df'] = None
+    st.session_state['uploaded_file_name'] = ""
+    st.session_state['search_submitted'] = False
+    st.rerun()
 
 def reset_search():
     """Callback function to reset submission state when any input filter changes."""
@@ -231,11 +268,18 @@ st.set_page_config(page_title="ASDD PDF Generator", layout="wide")
 st.title("Voter List Processing & ASDD PDF Generator")
 st.write("This application helps Election Booth Level Officers (BLOs) process voter lists and generate formatted ASDD PDF reports.")
 
+# Check for persistently saved Excel data on disk if nothing is loaded in memory
+if st.session_state['master_df'] is None:
+    cached_df, cached_filename = load_cached_data()
+    if cached_df is not None:
+        st.session_state['master_df'] = cached_df
+        st.session_state['uploaded_file_name'] = cached_filename
+
 # 1. Excel File Upload Handler
 uploaded_file = st.file_uploader("Upload Master Voter List Excel File (.xlsx)", type=["xlsx"])
 
 if uploaded_file is not None:
-    # If a brand-new file is uploaded, parse and store it
+    # If a brand-new file is uploaded, parse and store it in session state & local cache
     if uploaded_file.name != st.session_state['uploaded_file_name']:
         try:
             with st.spinner("Processing new Excel file..."):
@@ -247,31 +291,70 @@ if uploaded_file is not None:
                 
                 if missing_cols:
                     st.error(f"The Excel file is missing the following required structural columns: {', '.join(missing_cols)}")
-                    st.session_state['master_df'] = None
-                    st.session_state['uploaded_file_name'] = ""
                 else:
                     st.session_state['master_df'] = normalized_df
                     st.session_state['uploaded_file_name'] = uploaded_file.name
                     st.session_state['search_submitted'] = False  # Reset query on new file load
-                    st.success(f"Successfully loaded and structured: {uploaded_file.name}")
+                    save_to_cache(normalized_df, uploaded_file.name)
+                    st.success(f"Successfully loaded and saved: {uploaded_file.name}")
         except Exception as e:
             st.error(f"An error occurred while loading the file: {e}")
 
 # Display current database state
 if st.session_state['master_df'] is not None:
-    st.info(f"📁 **Active Master List:** Using loaded file `{st.session_state['uploaded_file_name']}`. (Upload another file above if you wish to change it).")
+    db_df = st.session_state['master_df']
     
-    # 2. Parameters Configuration Input Form
-    col1, col2 = st.columns(2)
+    # Provide status details along with a cache-clearing button
+    col_status, col_clear = st.columns([4, 1])
+    with col_status:
+        st.info(f"📁 **Active Master List:** Using loaded file `{st.session_state['uploaded_file_name']}`. (Upload another file above if you wish to change it).")
+    with col_clear:
+        if st.button("🗑️ Clear Saved Data", use_container_width=True, help="Removes the saved database from your computer's local drive."):
+            clear_cache()
+            
+    # 2. Dynamic Parameters Processing from Excel
+    # Extract unique, sorted list of Assembly Constituencies (AC)
+    ac_options = []
+    if 'ac_name' in db_df.columns:
+        raw_acs = db_df['ac_name'].dropna().apply(clean_val).unique()
+        ac_options = sorted([ac for ac in raw_acs if ac != ""])
+    
+    # 3. Parameters Configuration Input Form (3 columns: AC, PS / Part, Category)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        part_no_selection = st.selectbox(
-            "Select Part Number:",
-            options=["242", "243", "244", "245", "246", "247", "248", "249", "252"],
+        ac_selection = st.selectbox(
+            "Select Assembly Constituency (AC):",
+            options=ac_options if ac_options else ["N/A"],
             on_change=reset_search
         )
     
+    # Extract unique Polling Station (Part) Numbers belonging to the selected AC
+    part_options = []
+    if 'part_no' in db_df.columns:
+        # Filter records based on selected AC if available
+        if 'ac_name' in db_df.columns and ac_selection != "N/A":
+            db_filtered = db_df[db_df['ac_name'].apply(clean_val) == ac_selection]
+        else:
+            db_filtered = db_df
+            
+        raw_parts = db_filtered['part_no'].dropna().apply(clean_val).unique()
+        raw_parts = [p for p in raw_parts if p != ""]
+        
+        # Sort parts numerically if possible, otherwise alphabetically
+        try:
+            part_options = sorted(raw_parts, key=lambda x: int(x))
+        except ValueError:
+            part_options = sorted(raw_parts)
+
     with col2:
+        part_no_selection = st.selectbox(
+            "Select Polling Station (PS) / Part No:",
+            options=part_options if part_options else ["N/A"],
+            on_change=reset_search
+        )
+    
+    with col3:
         category_selection = st.selectbox(
             "Select Target List Category (Annexure Type):",
             options=list(CATEGORIES.keys()),
@@ -290,37 +373,38 @@ if st.session_state['master_df'] is not None:
     if serial_input.strip():
         parsed_serials = [clean_val(s) for s in re.split(r'[,\s\n]+', serial_input) if s.strip()]
     
-    # 3. Submit Action Trigger
+    # 4. Submit Action Trigger
     submit_button = st.button("Submit / Look Up Voters", type="primary")
     
     if submit_button:
         if not parsed_serials:
             st.warning("Please enter at least one Part Serial Number before submitting.")
+        elif part_no_selection == "N/A":
+            st.warning("Please verify that a valid Polling Station / Part Number is selected.")
         else:
             st.session_state['search_submitted'] = True
 
-    # 4. Process Results (only if Submit is clicked or already in submission state)
+    # 5. Process Results (only if Submit is clicked or already in submission state)
     if st.session_state['search_submitted'] and parsed_serials:
-        df_db = st.session_state['master_df']
-        
         # Standardize matching criteria
-        df_db['part_no_clean'] = df_db['part_no'].apply(clean_val)
-        df_db['serial_no_clean'] = df_db['serial_no'].apply(clean_val)
+        db_df['part_no_clean'] = db_df['part_no'].apply(clean_val)
+        db_df['serial_no_clean'] = db_df['serial_no'].apply(clean_val)
         
-        matched_records = df_db[
-            (df_db['part_no_clean'] == part_no_selection) &
-            (df_db['serial_no_clean'].isin(parsed_serials))
-        ].copy()
+        # Build query structure incorporating AC selection if applicable
+        if 'ac_name' in db_df.columns and ac_selection != "N/A":
+            db_df['ac_clean'] = db_df['ac_name'].apply(clean_val)
+            matched_records = db_df[
+                (db_df['ac_clean'] == ac_selection) &
+                (db_df['part_no_clean'] == part_no_selection) &
+                (db_df['serial_no_clean'].isin(parsed_serials))
+            ].copy()
+        else:
+            matched_records = db_df[
+                (db_df['part_no_clean'] == part_no_selection) &
+                (db_df['serial_no_clean'].isin(parsed_serials))
+            ].copy()
         
         if not matched_records.empty:
-            # Dynamically extract Assembly Constituency Name
-            if 'ac_name' in matched_records.columns and not matched_records['ac_name'].empty:
-                ac_name_raw = matched_records['ac_name'].iloc[0]
-                ac_name_raw = safe_extract_scalar(ac_name_raw)
-                ac_name = clean_val(ac_name_raw) if (pd.notna(ac_name_raw) and str(ac_name_raw).strip() != "") else "N/A"
-            else:
-                ac_name = "N/A"
-            
             st.success(f"Located {len(matched_records)} voter record(s) matching Part No. {part_no_selection}.")
             
             # Populate default category remarks column
@@ -346,7 +430,7 @@ if st.session_state['master_df'] is not None:
             st.write("You can double-click table cells below to edit voter information or write custom remarks before downloading.")
             
             # Build a stable key referencing input selections to safely track editor state across page reruns
-            editor_key = f"ed_{part_no_selection}_{category_info['annexure']}_{len(parsed_serials)}"
+            editor_key = f"ed_{ac_selection}_{part_no_selection}_{category_info['annexure']}_{len(parsed_serials)}"
             edited_df = st.data_editor(editable_df, use_container_width=True, hide_index=True, key=editor_key)
             
             # Map editor changes back to data records for printing
@@ -361,7 +445,7 @@ if st.session_state['master_df'] is not None:
                 })
             
             st.markdown("---")
-            pdf_buffer = generate_pdf(final_pdf_rows, ac_name, part_no_selection, category_info)
+            pdf_buffer = generate_pdf(final_pdf_rows, ac_selection, part_no_selection, category_info)
             filename = f"{category_info['annexure']}_Part_{part_no_selection}.pdf"
             
             st.download_button(
