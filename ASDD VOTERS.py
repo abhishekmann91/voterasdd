@@ -24,7 +24,7 @@ except ImportError:
 CACHE_FILE = "master_voter_pdf_cache.pkl"
 METADATA_FILE = "master_voter_pdf_metadata.txt"
 
-# Define category properties per the system specification
+# Define category properties per the ECI specifications
 CATEGORIES = {
     "Permanently Shifted": {
         "annexure": "Annexure-II",
@@ -88,21 +88,25 @@ def classify_reason(reason):
         return "Others"
 
 def parse_eci_pdf(file_bytes):
-    """Parses vector text ECI PDF documents page by page to extract voter tables."""
+    """
+    Parses vector text ECI PDF documents page-by-page. Uses layout-aware text
+    extraction to isolate table columns reliably and prevent name merging.
+    """
     reader = pypdf.PdfReader(io.BytesIO(file_bytes))
     extracted_rows = []
     
     ac_name = "Not Found"
     part_no = "Not Found"
     
-    # Regex patterns for matching headers and rows
     ac_part_pattern = re.compile(r'AC:\s*(.*?);\s*Part:\s*([^\n\r]+)')
-    row_pattern = re.compile(
-        r'^\s*(\d+)\s+(\d+)\s+([A-Z0-9]{10})\s+(.+?)\s+([^\(]+?\s*\([A-Za-z\s\/]+\))\s*\((\d+)\)\s*(.*)$'
-    )
     
     for page in reader.pages:
-        text = page.extract_text()
+        # Extract text preserving spatial layout to isolate wide table gaps
+        try:
+            text = page.extract_text(extraction_mode="layout")
+        except Exception:
+            text = page.extract_text()  # Fallback to standard if layout is unsupported
+            
         if not text:
             continue
             
@@ -110,36 +114,107 @@ def parse_eci_pdf(file_bytes):
         for line in lines:
             line_str = line.strip()
             
-            # AC & Part Parsing
+            # AC & Part parsing from header
             if "AC:" in line_str and "Part:" in line_str:
                 match_ac = ac_part_pattern.search(line_str)
                 if match_ac:
                     ac_name = match_ac.group(1).strip()
                     part_no = match_ac.group(2).strip()
             
-            # Voter Data Row Parsing
-            match_row = row_pattern.match(line_str)
-            if match_row:
-                s_no = match_row.group(1)
-                serial_no = match_row.group(2)
-                epic_no = match_row.group(3)
-                elector_name = match_row.group(4)
-                relative_details = match_row.group(5)
-                age = match_row.group(6)
-                uncollectable_reason = match_row.group(7).strip()
+            # Locate rows by matching EPIC Numbers (7 to 15 alphanumeric characters with optional symbols)
+            epic_match = re.search(r'\b([A-Z0-9\-/]{7,15})\b', line_str, re.IGNORECASE)
+            if not epic_match:
+                continue
                 
-                category = classify_reason(uncollectable_reason)
+            epic_no = epic_match.group(1)
+            epic_start_idx = line_str.find(epic_no)
+            
+            # Process S.No and Serial No from left segment
+            before_epic = line_str[:epic_start_idx].strip()
+            before_parts = before_epic.split()
+            if len(before_parts) < 2:
+                continue
                 
-                extracted_rows.append({
-                    'serial_no': serial_no,
-                    'epic_no': epic_no,
-                    'elector_name': elector_name,
-                    'relative_name': relative_details,
-                    'age': age,
-                    'uncollectable_reason': uncollectable_reason,
-                    'category': category
-                })
+            s_no = before_parts[0]
+            serial_no = before_parts[1]
+            
+            # Verify the row begins with index digits
+            if not (s_no.isdigit() and serial_no.isdigit()):
+                continue
                 
+            # Process names, age, and reason from right segment
+            after_epic = line_str[epic_start_idx + len(epic_no):].strip()
+            
+            # Check for column alignment separation (split by 2 or more consecutive spaces)
+            after_parts = [p.strip() for p in re.split(r'\s{2,}', after_epic) if p.strip()]
+            
+            elector_name = ""
+            relative_details = ""
+            age = ""
+            uncollectable_reason = ""
+            
+            if len(after_parts) >= 3:
+                # Layout spacing preserved columns cleanly
+                elector_name = after_parts[0]
+                relative_details = after_parts[1]
+                
+                # Check parts to extract age correctly if it is present
+                age_found_idx = -1
+                for idx in range(2, len(after_parts)):
+                    if re.match(r'^\s*\(?\d+\)?\s*$', after_parts[idx]):
+                        age_found_idx = idx
+                        break
+                        
+                if age_found_idx != -1:
+                    age = after_parts[age_found_idx].strip("()")
+                    uncollectable_reason = after_parts[-1]
+                    # Join multi-word components if relative details were split
+                    if age_found_idx > 2:
+                        relative_details = " ".join(after_parts[1:age_found_idx])
+                else:
+                    uncollectable_reason = after_parts[-1]
+                    age = ""
+            else:
+                # Heuristic fallback if columns are compressed with single spaces
+                relation_match = re.search(r'(\([A-Za-z\s\/]+\))\s*\((\d+)\)\s*(.*)$', after_epic)
+                if relation_match:
+                    relation_str = relation_match.group(1)
+                    age = relation_match.group(2)
+                    uncollectable_reason = relation_match.group(3).strip()
+                    
+                    names_part = after_epic[:relation_match.start()].strip()
+                    words = names_part.split()
+                    
+                    if len(words) >= 4:
+                        elector_name = " ".join(words[:2])
+                        relative_details = " ".join(words[2:]) + " " + relation_str
+                    elif len(words) == 3:
+                        elector_name = words[0]
+                        relative_details = " ".join(words[1:]) + " " + relation_str
+                    elif len(words) == 2:
+                        elector_name = words[0]
+                        relative_details = words[1] + " " + relation_str
+                    else:
+                        elector_name = names_part
+                        relative_details = relation_str
+                else:
+                    elector_name = after_epic
+                    relative_details = ""
+                    age = ""
+                    uncollectable_reason = ""
+            
+            category = classify_reason(uncollectable_reason)
+            
+            extracted_rows.append({
+                'serial_no': serial_no,
+                'epic_no': epic_no,
+                'elector_name': elector_name,
+                'relative_name': relative_details,
+                'age': age,
+                'uncollectable_reason': uncollectable_reason,
+                'category': category
+            })
+            
     df = pd.DataFrame(extracted_rows)
     return df, ac_name, part_no
 
@@ -178,13 +253,6 @@ def clear_cache():
     st.session_state['part_info'] = ""
     st.session_state['pdf_filename'] = ""
     st.rerun()
-
-def safe_extract_scalar(val):
-    if hasattr(val, "iloc"):
-        val = val.iloc[0]
-    if isinstance(val, (list, tuple)) and len(val) > 0:
-        val = val[0]
-    return val
 
 def generate_pdf_report(data_rows, ac_name, part_no, category_config):
     """Generates a standard A4 PDF strictly matching the chosen Annexure template."""
@@ -336,7 +404,7 @@ if uploaded_file is not None:
         except Exception as e:
             st.error(f"Parsing failed: {e}")
 
-# If dataset is active, display report configuration interfaces
+# If dataset is active, display report interfaces
 if st.session_state['voter_df'] is not None:
     voter_db = st.session_state['voter_df']
     
@@ -366,8 +434,7 @@ if st.session_state['voter_df'] is not None:
             if not cat_df.empty:
                 st.write(f"📁 Found **{len(cat_df)}** records matching **{cat_name}**.")
                 
-                # PRE-POPULATE with the EXACT string extracted from the PDF
-                # (e.g. "Already enrolled (URO3510864)" or "EF Refused") instead of static defaults
+                # Pre-populate using the exact string parsed from the ECI document
                 cat_df['remarks'] = cat_df['uncollectable_reason'].apply(
                     lambda x: x if str(x).strip() != "" else cat_config['default_remark']
                 )
