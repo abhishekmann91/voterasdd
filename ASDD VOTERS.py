@@ -48,7 +48,7 @@ CATEGORIES = {
         "filename_suffix": "Duplicate_Already_Enrolled"
     },
     "Absent": {
-        "annexure": "Annexure-V",
+        "annexure": "Annexure-I",
         "title": "List of ASDD Electors: Category - Absent",
         "last_col": "Remarks (Refused to sign etc.)",
         "default_remark": "Absent",
