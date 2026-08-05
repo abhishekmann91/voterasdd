@@ -3,3 +3,4 @@ pandas
 openpyxl
 reportlab
 pypdf
+starlette<0.39.0
