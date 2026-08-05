@@ -3,19 +3,29 @@ import pandas as pd
 import io
 import re
 import os
-import pypdf
-from reportlab.lib.pagesizes import A4
-from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
+
+# Safely import pypdf
+try:
+    import pypdf
+except ImportError:
+    st.error("The 'pypdf' library is missing. Please run 'pip install pypdf' in your terminal.")
+
+# Safely import reportlab
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+except ImportError:
+    st.error("The 'reportlab' library is missing. Please run 'pip install reportlab' in your terminal.")
 
 # Cache configuration files
 CACHE_FILE = "master_voter_pdf_cache.pkl"
 METADATA_FILE = "master_voter_pdf_metadata.txt"
 
-# Dynamic Mapping Configuration for the 5 requested categories
-PDF_CATEGORIES = {
+# Define category properties per the system specification
+CATEGORIES = {
     "Permanently Shifted": {
         "annexure": "Annexure-II",
         "title": "List of ASDD Electors: Category - Permanently Shifted",
@@ -78,22 +88,15 @@ def classify_reason(reason):
         return "Others"
 
 def parse_eci_pdf(file_bytes):
-    """
-    Parses vector text ECI PDF documents page by page to extract voter tables 
-    and document headers dynamically.
-    """
+    """Parses vector text ECI PDF documents page by page to extract voter tables."""
     reader = pypdf.PdfReader(io.BytesIO(file_bytes))
     extracted_rows = []
     
     ac_name = "Not Found"
     part_no = "Not Found"
     
-    # Regex pattern to match document header structures
-    # Example: "AC: 6-RITHALA; Part: 243-SECTOR-1, ROHINI"
+    # Regex patterns for matching headers and rows
     ac_part_pattern = re.compile(r'AC:\s*(.*?);\s*Part:\s*([^\n\r]+)')
-    
-    # Regex pattern to match tabular row data cleanly.
-    # Ex: "1 25 URO2221496 BABU LAL UTTAM CHAND (Father) (38) Permanently Shifted"
     row_pattern = re.compile(
         r'^\s*(\d+)\s+(\d+)\s+([A-Z0-9]{10})\s+(.+?)\s+([^\(]+?\s*\([A-Za-z\s\/]+\))\s*\((\d+)\)\s*(.*)$'
     )
@@ -107,19 +110,19 @@ def parse_eci_pdf(file_bytes):
         for line in lines:
             line_str = line.strip()
             
-            # 1. Attempt header info parsing
+            # AC & Part Parsing
             if "AC:" in line_str and "Part:" in line_str:
                 match_ac = ac_part_pattern.search(line_str)
                 if match_ac:
                     ac_name = match_ac.group(1).strip()
                     part_no = match_ac.group(2).strip()
             
-            # 2. Attempt row data matching
+            # Voter Data Row Parsing
             match_row = row_pattern.match(line_str)
             if match_row:
                 s_no = match_row.group(1)
-                serial_no = match_row.group(2)  # SL No. in the part
-                epic_no = match_row.group(3)    # EPIC Number
+                serial_no = match_row.group(2)
+                epic_no = match_row.group(3)
                 elector_name = match_row.group(4)
                 relative_details = match_row.group(5)
                 age = match_row.group(6)
@@ -141,7 +144,7 @@ def parse_eci_pdf(file_bytes):
     return df, ac_name, part_no
 
 def load_cached_data():
-    """Tries to read persisted dataset and parameters from disk."""
+    """Reads persisted dataset and parameters from disk if available."""
     if os.path.exists(CACHE_FILE) and os.path.exists(METADATA_FILE):
         try:
             df = pd.read_pickle(CACHE_FILE)
@@ -156,7 +159,7 @@ def load_cached_data():
     return None, "", "", ""
 
 def save_to_cache(df, ac_info, part_info, filename):
-    """Saves the parsed data and metadata to disk."""
+    """Saves the normalized DataFrame and original filename to disk."""
     try:
         df.to_pickle(CACHE_FILE)
         with open(METADATA_FILE, "w") as f:
@@ -165,7 +168,7 @@ def save_to_cache(df, ac_info, part_info, filename):
         st.error(f"Unable to write cache files: {e}")
 
 def clear_cache():
-    """Deletes cached local files and resets the current session state."""
+    """Deletes cached local files and resets session state."""
     if os.path.exists(CACHE_FILE):
         os.remove(CACHE_FILE)
     if os.path.exists(METADATA_FILE):
@@ -176,8 +179,15 @@ def clear_cache():
     st.session_state['pdf_filename'] = ""
     st.rerun()
 
+def safe_extract_scalar(val):
+    if hasattr(val, "iloc"):
+        val = val.iloc[0]
+    if isinstance(val, (list, tuple)) and len(val) > 0:
+        val = val[0]
+    return val
+
 def generate_pdf_report(data_rows, ac_name, part_no, category_config):
-    """Generates official ReportLab PDF matched strictly to the chosen Annexure template."""
+    """Generates a standard A4 PDF strictly matching the chosen Annexure template."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -291,9 +301,7 @@ def generate_pdf_report(data_rows, ac_name, part_no, category_config):
     buffer.seek(0)
     return buffer
 
-# --- Streamlit Execution Flow ---
-st.set_page_config(page_title="ECI PDF ASDD Parser", layout="wide")
-
+# --- Streamlit Layout ---
 st.title("ECI PDF Parser & ASDD Annexure Generator")
 st.write("Upload a vector PDF generated from ECI databases to dynamically build and export specialized ASDD Annexure reports.")
 
@@ -332,12 +340,12 @@ if uploaded_file is not None:
 if st.session_state['voter_df'] is not None:
     voter_db = st.session_state['voter_df']
     
-    # Render Status Block
+    # Render Status Block without using non-standard container width options
     col_status, col_clear = st.columns([4, 1])
     with col_status:
         st.info(f"📄 **Active File:** `{st.session_state['pdf_filename']}` | **AC Info:** {st.session_state['ac_info']} | **Part Number:** {st.session_state['part_info']}")
     with col_clear:
-        if st.button("🗑️ Clear Parsed Data", use_container_width=True, help="Removes the persistent cache and resets the app."):
+        if st.button("🗑️ Clear Parsed Data", help="Removes the persistent cache and resets the app."):
             clear_cache()
             
     st.markdown("---")
@@ -345,12 +353,12 @@ if st.session_state['voter_df'] is not None:
     st.write("Review, edit, and export specialized voter lists below based on ECI uncollectable reasons.")
     
     # Build 5 tab categories
-    tab_list = list(PDF_CATEGORIES.keys())
+    tab_list = list(CATEGORIES.keys())
     tabs = st.tabs(tab_list)
     
     for i, cat_name in enumerate(tab_list):
         with tabs[i]:
-            cat_config = PDF_CATEGORIES[cat_name]
+            cat_config = CATEGORIES[cat_name]
             
             # Filter rows belonging to the specific category
             cat_df = voter_db[voter_db['category'] == cat_name].copy()
@@ -358,8 +366,11 @@ if st.session_state['voter_df'] is not None:
             if not cat_df.empty:
                 st.write(f"📁 Found **{len(cat_df)}** records matching **{cat_name}**.")
                 
-                # Setup editable table structure with custom category default remarks
-                cat_df['remarks'] = cat_config['default_remark']
+                # PRE-POPULATE with the EXACT string extracted from the PDF
+                # (e.g. "Already enrolled (URO3510864)" or "EF Refused") instead of static defaults
+                cat_df['remarks'] = cat_df['uncollectable_reason'].apply(
+                    lambda x: x if str(x).strip() != "" else cat_config['default_remark']
+                )
                 
                 display_schema = {
                     'serial_no': 'SL No. in the Part',
@@ -374,7 +385,14 @@ if st.session_state['voter_df'] is not None:
                 
                 # Render Data Editor
                 editor_key = f"edit_{cat_name}_{st.session_state['pdf_filename']}_{len(cat_df)}"
-                edited_df = st.data_editor(editable_subset, use_container_width=True, hide_index=True, key=editor_key)
+                
+                # Use st.data_editor if available, otherwise fallback gracefully
+                if hasattr(st, "data_editor"):
+                    edited_df = st.data_editor(editable_subset, use_container_width=True, hide_index=True, key=editor_key)
+                else:
+                    st.warning("Your Streamlit version is older and does not support interactive editing. Showing static view.")
+                    st.dataframe(editable_subset)
+                    edited_df = editable_subset
                 
                 # Format final row payloads back into ReportLab
                 payload_rows = []
