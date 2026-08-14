@@ -28,7 +28,7 @@ METADATA_FILE = "master_voter_pdf_metadata.txt"
 CATEGORIES = {
     "Permanently Shifted": {
         "annexure": "Annexure-II",
-        "title": "List of ASDD Electors(As generated from ECINet) Handed over to BLAs:" /n "Category - Permanently Shifted",
+        "title": "List of ASDD Electors(As generated from ECINet) Handed over to BLAs: Category - Permanently Shifted",
         "last_col": "Category / Remarks",
         "default_remark": "Permanently Shifted",
         "filename_suffix": "Permanently_Shifted"
