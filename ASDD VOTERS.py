@@ -28,35 +28,35 @@ METADATA_FILE = "master_voter_pdf_metadata.txt"
 CATEGORIES = {
     "Permanently Shifted": {
         "annexure": "Annexure-II",
-        "title": "List of ASDD Electors: Category - Permanently Shifted",
+        "title": "List of ASDD Electors(As generated from ECINet) Handed over to BLAs: Category - Permanently Shifted",
         "last_col": "Category / Remarks",
         "default_remark": "Permanently Shifted",
         "filename_suffix": "Permanently_Shifted"
     },
     "Death": {
         "annexure": "Annexure-III",
-        "title": "List of ASDD Electors: Category - Dead / Death Cases",
+        "title": "List of ASDD Electors(As generated from ECINet) Handed over to BLAs: Category - Dead / Death Cases",
         "last_col": "Category / Remarks",
         "default_remark": "Dead",
         "filename_suffix": "Dead_Cases"
     },
     "Already Enrolled": {
         "annexure": "Annexure-IV",
-        "title": "List of ASDD Electors: Category - Duplicate / Already Enrolled",
+        "title": "List of ASDD Electors(As generated from ECINet) Handed over to BLAs: Category - Duplicate / Already Enrolled",
         "last_col": "Category / Remarks",
         "default_remark": "Already Enrolled / Duplicate",
         "filename_suffix": "Duplicate_Already_Enrolled"
     },
     "Absent": {
         "annexure": "Annexure-I",
-        "title": "List of ASDD Electors: Category - Absent",
+        "title": "List of ASDD Electors(As generated from ECINet) Handed over to BLAs: Category - Absent",
         "last_col": "Remarks (Refused to sign etc.)",
         "default_remark": "Absent",
         "filename_suffix": "Absent"
     },
     "Others": {
         "annexure": "Annexure-V",
-        "title": "List of ASDD Electors: Category - Others",
+        "title": "List of ASDD Electors(As generated from ECINet) Handed over to BLAs: Category - Others",
         "last_col": "Remarks (Refused to sign etc.)",
         "default_remark": "Others",
         "filename_suffix": "Others"
